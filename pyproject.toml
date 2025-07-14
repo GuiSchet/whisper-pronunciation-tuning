@@ -1,0 +1,72 @@
+[project]
+name = "whisper-pronunciation-tuning"
+version = "0.1.0"
+description = "Fine-tuning de Whisper para análisis de pronunciación en inglés usando speechocean762"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "torch>=2.5.0",
+    "torchvision>=0.20.0",
+    "torchaudio>=2.5.0",
+    "transformers>=4.35.0",
+    "datasets>=2.14.0",
+    "accelerate>=0.20.0",
+    "peft>=0.6.0",
+    "evaluate>=0.4.0",
+    "jiwer>=3.0.0",
+    "librosa>=0.10.0",
+    "soundfile>=0.12.0",
+    "wandb>=0.15.0",
+    "tensorboard>=2.14.0",
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "scipy>=1.10.0",
+    "scikit-learn>=1.3.0",
+    "tqdm>=4.65.0",
+    "omegaconf>=2.3.0",
+    "phonemizer>=3.2.0"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "black>=23.0.0",
+    "isort>=5.12.0",
+    "flake8>=6.0.0"
+]
+
+# PyTorch con CUDA 12.1
+[[tool.uv.index]]
+name = "torch"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "torch" }
+torchvision = { index = "torch" }
+torchaudio = { index = "torch" }
+
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = [
+    "main", 
+    "data_loader", 
+    "whisper_pronunciation_trainer", 
+    "pronunciation_analyzer", 
+    "demo_inference"
+]
+
+[tool.black]
+line-length = 100
+target-version = ['py311']
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+
