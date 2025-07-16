@@ -103,6 +103,8 @@ def train_model(args):
         
     except Exception as e:
         logger.error(f"❌ Error durante el entrenamiento: {e}")
+        import traceback
+        logger.error(f"Traceback completo: {traceback.format_exc()}")
         return False
 
 

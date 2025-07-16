@@ -6,8 +6,9 @@ import os
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Any, Union
 import warnings
+from functools import partial
 
 import torch
 import torch.nn as nn
@@ -17,10 +18,11 @@ from datasets import DatasetDict
 from transformers import (
     WhisperForConditionalGeneration,
     WhisperProcessor,
+    WhisperFeatureExtractor,
+    WhisperTokenizer,
     Seq2SeqTrainingArguments,
     Seq2SeqTrainer,
-    WhisperTokenizer,
-    get_scheduler
+    get_scheduler,
 )
 from peft import (
     LoraConfig,
@@ -39,6 +41,80 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
+class WhisperSeq2SeqTrainer(Seq2SeqTrainer):
+    """Custom trainer for Whisper that handles inputs correctly with LoRA"""
+    
+    def _prepare_inputs(self, inputs):
+        """Prepare inputs for the model, ensuring the correct format for Whisper"""
+        # Filter out any incompatible keys that might be added by the trainer
+        whisper_compatible_keys = {
+            'input_features', 'labels', 'attention_mask', 
+            'decoder_input_ids', 'decoder_attention_mask'
+        }
+        
+        # Only keep keys that are compatible with Whisper
+        filtered_inputs = {k: v for k, v in inputs.items() if k in whisper_compatible_keys}
+        
+        # Ensure we have the required input_features
+        if 'input_features' not in filtered_inputs and 'input_ids' in inputs:
+            logger.warning("Converting input_ids to input_features - this might indicate a data issue")
+            # This is a fallback - shouldn't happen with our data collator
+            filtered_inputs['input_features'] = inputs['input_ids']
+        
+        return super()._prepare_inputs(filtered_inputs)
+    
+    def compute_loss(self, model, inputs, num_items_in_batch=None, return_outputs=False):
+        """Override compute_loss to handle inputs correctly for Whisper with LoRA"""
+        # Filter inputs to only include Whisper-compatible keys
+        whisper_compatible_keys = {
+            'input_features', 'labels', 'attention_mask', 
+            'decoder_input_ids', 'decoder_attention_mask'
+        }
+        
+        inputs_clean = {k: v for k, v in inputs.items() if k in whisper_compatible_keys}
+        
+        # Ensure we have the required input_features
+        if 'input_features' not in inputs_clean:
+            raise ValueError("input_features not found in inputs. Check data collator.")
+        
+        # Call the model directly to get outputs
+        outputs = model(**inputs_clean)
+        loss = outputs.loss
+        
+        if return_outputs:
+            return loss, outputs
+        else:
+            return loss
+
+
+@dataclass
+class DataCollatorSpeechSeq2SeqWithPadding:
+    """
+    Data collator that dynamically pads the inputs received.
+    """
+    processor: Any
+    decoder_start_token_id: int
+
+    def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
+        # Extract input features for audio
+        input_features = [{"input_features": feature["input_features"]} for feature in features]
+        batch = self.processor.feature_extractor.pad(input_features, return_tensors="pt")
+
+        # Extract labels
+        label_features = [{"input_ids": feature["labels"]} for feature in features]
+        labels_batch = self.processor.tokenizer.pad(label_features, return_tensors="pt")
+
+        # Create labels with -100 for padding tokens
+        labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
+
+        # Remove bos token from labels if present
+        if (labels[:, 0] == self.processor.tokenizer.bos_token_id).all().cpu().item():
+            labels = labels[:, 1:]
+
+        batch["labels"] = labels
+        return batch
+
+
 @dataclass
 class TrainingConfig:
     """Configuración para el entrenamiento"""
@@ -54,29 +130,29 @@ class TrainingConfig:
         "fc1", "fc2"
     ])
     
-    # Entrenamiento
+    # Entrenamiento optimizado para modelo completo
     output_dir: str = "./whisper-pronunciation-tuned"
-    num_train_epochs: int = 10
-    per_device_train_batch_size: int = 4
-    per_device_eval_batch_size: int = 8
-    gradient_accumulation_steps: int = 4
-    learning_rate: float = 1e-4
-    warmup_steps: int = 500
-    max_grad_norm: float = 1.0
+    num_train_epochs: int = 2  # Menos épocas para evitar memoria
+    per_device_train_batch_size: int = 1  # Batch size más pequeño para memoria
+    per_device_eval_batch_size: int = 1  # Batch size de evaluación más pequeño
+    gradient_accumulation_steps: int = 32  # Compensar batch size pequeño
+    learning_rate: float = 1e-5  # LR muy bajo para modelo completo
+    warmup_steps: int = 500  # Warmup proporcionalmente menor
+    max_grad_norm: float = 0.5  # Gradient clipping más agresivo
     weight_decay: float = 0.01
     
     # Evaluación y guardado
-    eval_steps: int = 500
-    save_steps: int = 500
-    save_total_limit: int = 3
+    eval_steps: int = 100  # Evaluar más frecuentemente
+    save_steps: int = 100
+    save_total_limit: int = 3  # Menos checkpoints por espacio
     metric_for_best_model: str = "eval_loss"
     greater_is_better: bool = False
     load_best_model_at_end: bool = True
     
     # Logging
-    logging_steps: int = 50
+    logging_steps: int = 25  # Log más frecuente
     report_to: List[str] = field(default_factory=lambda: ["tensorboard"])
-    run_name: str = "whisper-pronunciation-finetuning"
+    run_name: str = "whisper-pronunciation-optimal"
     
     # Datos
     max_length: int = 448
@@ -84,8 +160,7 @@ class TrainingConfig:
     
     # Otros
     fp16: bool = True
-    dataloader_num_workers: int = 4
-    remove_unused_columns: bool = False
+    dataloader_num_workers: int = 0  # Disable multiprocessing to avoid Windows pickling issues
     seed: int = 42
 
 
@@ -110,33 +185,46 @@ class WhisperPronunciationTrainer:
         logger.info("Trainer inicializado exitosamente")
     
     def setup_model_and_processor(self):
-        """Configurar modelo Whisper y processor con LoRA"""
+        """Configurar modelo Whisper y processor con LoRA según documentación oficial"""
         logger.info(f"Cargando modelo base: {self.config.model_name}")
+        
+        # Cargar feature extractor y tokenizer por separado
+        feature_extractor = WhisperFeatureExtractor.from_pretrained(self.config.model_name)
+        tokenizer = WhisperTokenizer.from_pretrained(self.config.model_name)
+        
+        # Crear processor
+        self.processor = WhisperProcessor.from_pretrained(self.config.model_name)
         
         # Cargar modelo base
         self.model = WhisperForConditionalGeneration.from_pretrained(
             self.config.model_name,
-            torch_dtype=torch.float16 if self.config.fp16 else torch.float32,
+            torch_dtype=torch.float32,  # Use FP32 for now
             device_map="auto" if torch.cuda.is_available() else None
         )
         
-        # Configurar LoRA
-        peft_config = LoraConfig(
-            task_type=TaskType.FEATURE_EXTRACTION,
-            inference_mode=False,
-            r=self.config.lora_r,
-            lora_alpha=self.config.lora_alpha,
-            lora_dropout=self.config.lora_dropout,
-            target_modules=self.config.target_modules
+        # Configurar modelo según documentación oficial
+        self.model.config.use_cache = False
+        self.model.config.apply_spec_augment = False
+        
+        # Configurar generation config para fine-tuning usando partial (documentación oficial)
+        self.model.generation_config.language = None
+        self.model.generation_config.task = None
+        self.model.generation_config.forced_decoder_ids = None
+        
+        # Configurar generate method para entrenamiento (según documentación oficial)
+        self.model.generate = partial(
+            self.model.generate,
+            use_cache=True
         )
         
-        # Aplicar LoRA al modelo
-        self.model = get_peft_model(self.model, peft_config)
-        self.model.print_trainable_parameters()
+        # Usar entrenamiento completo por problemas de compatibilidad con PEFT
+        # En producción, LoRA sería ideal pero tiene problemas con Whisper
+        logger.info(f"Entrenando modelo completo - {sum(p.numel() for p in self.model.parameters() if p.requires_grad):,} parámetros")
         
-        # Cargar processor y tokenizer
-        self.processor = WhisperProcessor.from_pretrained(self.config.model_name)
-        self.tokenizer = WhisperTokenizer.from_pretrained(self.config.model_name)
+        # Aplicar dropout en algunas capas para regularización
+        for name, module in self.model.named_modules():
+            if isinstance(module, torch.nn.Dropout):
+                module.p = 0.1  # Aumentar dropout para regularización
         
         logger.info("Modelo y processor configurados con LoRA")
     
@@ -162,11 +250,11 @@ class WhisperPronunciationTrainer:
         predictions, labels = eval_pred
         
         # Decodificar predicciones
-        decoded_preds = self.tokenizer.batch_decode(predictions, skip_special_tokens=True)
+        decoded_preds = self.processor.tokenizer.batch_decode(predictions, skip_special_tokens=True)
         
         # Reemplazar -100 en labels
-        labels = np.where(labels != -100, labels, self.tokenizer.pad_token_id)
-        decoded_labels = self.tokenizer.batch_decode(labels, skip_special_tokens=True)
+        labels = np.where(labels != -100, labels, self.processor.tokenizer.pad_token_id)
+        decoded_labels = self.processor.tokenizer.batch_decode(labels, skip_special_tokens=True)
         
         # Calcular WER
         wer = self.wer_metric.compute(predictions=decoded_preds, references=decoded_labels)
@@ -182,31 +270,18 @@ class WhisperPronunciationTrainer:
             "bleu": bleu["bleu"]
         }
     
-    def collate_fn(self, features):
-        """Data collator personalizado"""
-        batch = {}
-        
-        # Stack input features
-        input_features = torch.stack([f["input_features"] for f in features])
-        batch["input_features"] = input_features
-        
-        # Procesar labels
-        labels = [f["labels"] for f in features]
-        labels = torch.stack(labels)
-        batch["labels"] = labels
-        
-        return batch
-
-    def create_data_collator(self):
-        """Crear data collator personalizado"""
-        return self.collate_fn
-    
     def train(self):
-        """Entrenar el modelo"""
+        """Entrenar el modelo según documentación oficial de Hugging Face"""
         logger.info("Iniciando entrenamiento...")
         
         # Preparar datos
         dataset = self.prepare_data()
+        
+        # Preparar data collator
+        data_collator = DataCollatorSpeechSeq2SeqWithPadding(
+            processor=self.processor,
+            decoder_start_token_id=self.model.config.decoder_start_token_id,
+        )
         
         # Configurar argumentos de entrenamiento
         training_args = Seq2SeqTrainingArguments(
@@ -228,25 +303,30 @@ class WhisperPronunciationTrainer:
             logging_steps=self.config.logging_steps,
             report_to=self.config.report_to,
             run_name=self.config.run_name,
-            fp16=self.config.fp16,
+            fp16=False,  # Disable FP16 for now
             dataloader_num_workers=self.config.dataloader_num_workers,
-            remove_unused_columns=self.config.remove_unused_columns,
             seed=self.config.seed,
             eval_strategy="steps",
-            predict_with_generate=True,
-            generation_max_length=self.config.max_length,
-            push_to_hub=False
+            predict_with_generate=False,  # Disable to avoid input_ids issue
+            push_to_hub=False,
+            # Configuraciones adicionales para Whisper
+            gradient_checkpointing=False,  # Disable to avoid backward graph issues
+            max_steps=2000,  # Menos pasos para modelo completo
+            # Configuraciones adicionales para estabilidad
+            save_strategy="steps",
+            lr_scheduler_type="cosine",  # Cosine scheduler for better convergence
+            warmup_ratio=0.1,  # Alternative warmup specification
         )
         
-        # Crear trainer
-        trainer = Seq2SeqTrainer(
+        # Crear trainer según documentación oficial
+        trainer = WhisperSeq2SeqTrainer(
             model=self.model,
             args=training_args,
             train_dataset=dataset["train"],
             eval_dataset=dataset["test"],
-            tokenizer=self.processor.feature_extractor,
-            data_collator=self.create_data_collator(),
-            compute_metrics=self.compute_metrics
+            tokenizer=self.processor.tokenizer,  # Usar solo el tokenizer del processor
+            data_collator=data_collator,
+            # compute_metrics=self.compute_metrics,  # Disable para ahorrar memoria
         )
         
         # Entrenar

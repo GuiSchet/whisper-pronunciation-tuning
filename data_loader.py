@@ -216,8 +216,8 @@ class SpeechOceanDataLoader:
         # Crear texto objetivo con análisis de pronunciación
         target_text = self.create_pronunciation_analysis_text(example)
         
-        # Tokenizar texto objetivo
-        labels = self.tokenizer(
+        # Tokenizar texto objetivo - solo extraer input_ids para labels
+        labels_output = self.tokenizer(
             target_text,
             max_length=448,  # Máximo para Whisper
             truncation=True,
@@ -225,10 +225,13 @@ class SpeechOceanDataLoader:
             return_tensors="pt"
         )
         
-        return {
-            "input_features": inputs.input_features.squeeze(),
-            "labels": labels.input_ids.squeeze(),
-            "attention_mask": labels.attention_mask.squeeze(),
+        # Asegurarse de que los tensores tienen la forma correcta
+        input_features = inputs.input_features.squeeze(0)
+        labels = labels_output.input_ids.squeeze(0)
+
+        result = {
+            "input_features": input_features,
+            "labels": labels,
             "original_text": example.get("text", ""),
             "target_analysis": target_text,
             "scores": {
@@ -239,6 +242,8 @@ class SpeechOceanDataLoader:
                 "total": example.get("total", 0.0)
             }
         }
+        
+        return result
     
     def process_dataset(self, dataset: DatasetDict) -> DatasetDict:
         """Procesar todo el dataset para entrenamiento"""
