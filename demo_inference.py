@@ -1,6 +1,6 @@
 """
 Script de demostración para probar el análisis de pronunciación
-con el modelo Whisper fine-tuneado.
+con el modelo Whisper fine-tuneado usando muestras reales del dataset.
 """
 
 import os
@@ -13,19 +13,26 @@ import json
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
-from IPython.display import Audio, display
 import librosa
 
 from pronunciation_analyzer import PronunciationAnalyzer, PronunciationAnalysisResult
+from data_loader import SpeechOceanDataLoader
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Importación opcional de IPython para notebooks
+try:
+    from IPython.display import Audio, display
+    IPYTHON_AVAILABLE = True
+except ImportError:
+    IPYTHON_AVAILABLE = False
 
 
 class PronunciationDemo:
     """
     Clase de demostración para mostrar las capacidades del analizador
-    de pronunciación con ejemplos interactivos.
+    de pronunciación con ejemplos reales del dataset speechocean762.
     """
     
     def __init__(self, model_path: str, base_model: str = "openai/whisper-small"):
@@ -43,79 +50,179 @@ class PronunciationDemo:
             base_model=base_model
         )
         logger.info("✅ Analizador cargado exitosamente")
+        
+        # Inicializar data loader para acceder al dataset
+        logger.info("Cargando dataset speechocean762...")
+        self.data_loader = SpeechOceanDataLoader(
+            model_name=base_model,
+            cache_dir="./cache"
+        )
+        self.dataset = None
     
-    def generate_sample_audio(
-        self,
-        text: str = "Hello world",
-        duration: float = 2.0,
-        sample_rate: int = 16000
-    ) -> np.ndarray:
-        """
-        Generar audio de muestra sintético para pruebas
-        (En una implementación real, usarías archivos de audio reales)
-        """
-        # Generar señal sinusoidal simple como placeholder
+    def load_real_samples(self, num_samples: int = 3) -> List[Dict]:
+        """Cargar muestras reales del dataset speechocean762"""
+        try:
+            if self.dataset is None:
+                self.dataset = self.data_loader.load_dataset()
+            
+            # Usar muestras del conjunto de test
+            test_dataset = self.dataset["test"]
+            
+            # Seleccionar muestras variadas (diferentes scores)
+            samples = []
+            indices = [0, len(test_dataset)//4, len(test_dataset)//2]  # Muestras distribuidas
+            
+            for i, idx in enumerate(indices[:num_samples]):
+                if idx < len(test_dataset):
+                    sample = test_dataset[idx]
+                    
+                    # Procesar audio
+                    try:
+                        audio_array = self.data_loader.preprocess_audio(sample["audio"])
+                        
+                        sample_info = {
+                            "id": idx,
+                            "text": sample["text"],
+                            "audio_array": audio_array,
+                            "real_scores": {
+                                "accuracy": sample.get("accuracy", 0.0),
+                                "fluency": sample.get("fluency", 0.0),
+                                "completeness": sample.get("completeness", 0.0),
+                                "prosodic": sample.get("prosodic", 0.0),
+                                "total": sample.get("total", 0.0)
+                            },
+                            "words": sample.get("words", []),
+                            "description": f"Muestra real #{idx+1} del dataset"
+                        }
+                        samples.append(sample_info)
+                        logger.info(f"✅ Cargada muestra {i+1}: '{sample['text'][:50]}...'")
+                        
+                    except Exception as e:
+                        logger.warning(f"Error procesando muestra {idx}: {e}")
+                        continue
+            
+            if not samples:
+                logger.warning("No se pudieron cargar muestras del dataset, usando audio sintético")
+                return self.get_fallback_samples()
+                
+            return samples
+            
+        except Exception as e:
+            logger.error(f"Error cargando dataset: {e}")
+            logger.info("Usando muestras sintéticas como fallback...")
+            return self.get_fallback_samples()
+    
+    def get_fallback_samples(self) -> List[Dict]:
+        """Muestras sintéticas como fallback si no se puede cargar el dataset"""
+        logger.info("Generando muestras sintéticas...")
+        
+        sample_texts = [
+            "Hello world",
+            "The quick brown fox jumps over the lazy dog",  
+            "Pronunciation is very important for communication"
+        ]
+        
+        samples = []
+        for i, text in enumerate(sample_texts):
+            # Generar audio sintético mejorado
+            audio_array = self.generate_speech_like_audio(text)
+            
+            sample_info = {
+                "id": f"synthetic_{i}",
+                "text": text,
+                "audio_array": audio_array,
+                "real_scores": None,  # No hay scores reales para sintético
+                "words": [],
+                "description": f"Muestra sintética #{i+1}"
+            }
+            samples.append(sample_info)
+        
+        return samples
+    
+    def generate_speech_like_audio(self, text: str, duration: float = None) -> np.ndarray:
+        """Generar audio sintético mejorado (solo como fallback)"""
+        if duration is None:
+            duration = max(1.0, len(text) * 0.08)  # ~0.08s por carácter
+        
+        sample_rate = 16000
         t = np.linspace(0, duration, int(sample_rate * duration))
-        frequencies = [440, 523, 659, 784]  # Notas musicales
         
+        # Crear audio más realista con formantes
+        fundamental_freq = 120 + np.random.uniform(-20, 20)
         audio = np.zeros_like(t)
-        for i, freq in enumerate(frequencies):
-            segment_start = i * len(t) // len(frequencies)
-            segment_end = (i + 1) * len(t) // len(frequencies)
-            audio[segment_start:segment_end] = np.sin(2 * np.pi * freq * t[segment_start:segment_end])
         
-        # Añadir algo de ruido para hacerlo más realista
-        noise = np.random.normal(0, 0.1, len(audio))
-        audio = audio * 0.8 + noise * 0.2
+        # Simular palabras
+        words = text.split()
+        word_duration = duration / len(words)
+        
+        for i, word in enumerate(words):
+            start_time = i * word_duration
+            end_time = (i + 1) * word_duration
+            
+            start_idx = int(start_time * sample_rate)
+            end_idx = int(end_time * sample_rate)
+            
+            if start_idx < len(audio) and end_idx <= len(audio):
+                word_t = t[start_idx:end_idx]
+                
+                # Formantes variando por palabra
+                f1 = 500 + np.random.uniform(-100, 200)
+                f2 = 1500 + np.random.uniform(-300, 500)
+                
+                word_audio = np.zeros_like(word_t)
+                
+                # Múltiples armónicos
+                for harmonic in range(1, 5):
+                    freq = fundamental_freq * harmonic
+                    if freq < sample_rate // 2:
+                        amplitude = 1.0 / harmonic
+                        word_audio += amplitude * np.sin(2 * np.pi * freq * word_t)
+                
+                # Agregar formantes
+                word_audio += 0.3 * np.sin(2 * np.pi * f1 * word_t)
+                word_audio += 0.2 * np.sin(2 * np.pi * f2 * word_t)
+                
+                # Envolvente natural
+                envelope = np.exp(-2 * word_t / word_duration)
+                word_audio *= envelope
+                
+                audio[start_idx:end_idx] = word_audio
+        
+        # Ruido y filtrado
+        noise = np.random.normal(0, 0.05, len(audio))
+        audio = audio + noise
         
         # Normalizar
-        audio = audio / np.max(np.abs(audio)) * 0.8
+        max_val = np.max(np.abs(audio))
+        if max_val > 0:
+            audio = audio / max_val * 0.7
         
         return audio
     
-    def analyze_sample_texts(self) -> List[Dict]:
-        """Analizar textos de muestra con audio sintético"""
+    def analyze_real_samples(self) -> List[Dict]:
+        """Analizar muestras reales del dataset"""
         
-        sample_texts = [
-            {
-                "text": "Hello world",
-                "description": "Saludo básico en inglés",
-                "audio_file": None  # Se generará sintéticamente
-            },
-            {
-                "text": "The quick brown fox jumps over the lazy dog",
-                "description": "Pangrama clásico en inglés",
-                "audio_file": None
-            },
-            {
-                "text": "Pronunciation is very important for communication",
-                "description": "Frase sobre pronunciación",
-                "audio_file": None
-            }
-        ]
+        # Cargar muestras reales
+        samples = self.load_real_samples()
         
         results = []
         
-        for i, sample in enumerate(sample_texts):
-            logger.info(f"Analizando muestra {i+1}: '{sample['text']}'")
+        for i, sample in enumerate(samples):
+            logger.info(f"Analizando muestra {i+1}: '{sample['text'][:50]}{'...' if len(sample['text']) > 50 else ''}'")
             
             try:
-                # Generar audio sintético
-                audio_array = self.generate_sample_audio(
-                    text=sample["text"],
-                    duration=len(sample["text"]) * 0.1  # Duración basada en longitud del texto
-                )
-                
-                # Analizar pronunciación
+                # Analizar pronunciación con el modelo
                 analysis = self.analyzer.analyze_pronunciation(
-                    audio_array=audio_array,
-                    sampling_rate=16000
+                    audio_array=sample["audio_array"],
+                    sampling_rate=16000,
+                    expected_text=sample["text"]
                 )
                 
                 result = {
                     "sample_info": sample,
                     "analysis": analysis,
-                    "audio": audio_array
+                    "real_scores": sample["real_scores"],  # Scores reales del dataset
+                    "audio": sample["audio_array"]
                 }
                 
                 results.append(result)
@@ -311,20 +418,20 @@ class PronunciationDemo:
         
         # Analizar muestras
         logger.info("Generando y analizando muestras de audio...")
-        results = self.analyze_sample_texts()
+        results = self.analyze_real_samples()
         
         if not results:
             logger.error("❌ No se pudieron generar resultados")
             return
         
-        # Mostrar resultados detallados
-        self.print_detailed_results(results)
+        # Mostrar resultados detallados con comparación
+        self.display_detailed_results_with_comparison(results)
         
-        # Crear visualizaciones
+        # Crear visualizaciones de comparación
         if show_visualizations:
             try:
-                logger.info("Creando visualizaciones...")
-                self.create_visualization(results)
+                logger.info("Creando visualizaciones de comparación...")
+                self.create_comparison_visualization(results)
             except Exception as e:
                 logger.warning(f"No se pudieron crear visualizaciones: {e}")
         
@@ -335,9 +442,227 @@ class PronunciationDemo:
             except Exception as e:
                 logger.warning(f"No se pudo guardar el resumen: {e}")
         
-        print(f"\n✅ Demo completada exitosamente!")
-        print(f"   📊 Muestras analizadas: {len(results)}")
-        print(f"   🎯 Puntuación promedio: {np.mean([r['analysis'].scores.overall for r in results]):.2f}/10")
+        # Mostrar resumen final con métricas de comparación
+        self.show_final_summary_with_comparison(results)
+
+    def display_detailed_results_with_comparison(self, results: List[Dict]) -> None:
+        """Mostrar resultados detallados con comparación entre scores reales y predichos"""
+        
+        print("\n" + "="*90)
+        print("RESULTADOS DETALLADOS CON COMPARACIÓN REAL vs PREDICHO")
+        print("="*90)
+        
+        for i, result in enumerate(results):
+            sample_info = result["sample_info"]
+            analysis = result["analysis"]
+            real_scores = result.get("real_scores")
+            
+            print(f"\n🎯 MUESTRA {i+1}: {sample_info['description']}")
+            print(f"   Texto: '{sample_info['text']}'")
+            print("-" * 70)
+            
+            # Mostrar comparación de scores si hay datos reales
+            if real_scores:
+                print("📊 COMPARACIÓN DE PUNTUACIONES (Real vs Predicho):")
+                print(f"   • General:     {real_scores['total']:.1f}/10  →  {analysis.scores.overall:.1f}/10")
+                print(f"   • Precisión:   {real_scores['accuracy']:.1f}/10  →  {analysis.scores.accuracy:.1f}/10") 
+                print(f"   • Fluidez:     {real_scores['fluency']:.1f}/10  →  {analysis.scores.fluency:.1f}/10")
+                print(f"   • Completitud: {real_scores['completeness']:.1f}/1.0  →  {analysis.scores.completeness:.1f}/1.0")
+                print(f"   • Prosodia:    {real_scores['prosodic']:.1f}/10  →  {analysis.scores.prosodic:.1f}/10")
+                
+                # Calcular diferencias
+                diff_accuracy = abs(real_scores['accuracy'] - analysis.scores.accuracy)
+                diff_fluency = abs(real_scores['fluency'] - analysis.scores.fluency)
+                diff_total = abs(real_scores['total'] - analysis.scores.overall)
+                
+                print(f"\n📈 DIFERENCIAS (Error Absoluto):")
+                print(f"   • Precisión: {diff_accuracy:.1f}")
+                print(f"   • Fluidez: {diff_fluency:.1f}")
+                print(f"   • General: {diff_total:.1f}")
+                
+            else:
+                print("📊 PUNTUACIONES PREDICHAS:")
+                print(f"   • General: {analysis.scores.overall:.1f}/10")
+                print(f"   • Precisión: {analysis.scores.accuracy:.1f}/10")
+                print(f"   • Fluidez: {analysis.scores.fluency:.1f}/10")
+                print(f"   • Completitud: {analysis.scores.completeness:.1f}/1.0")
+                print(f"   • Prosodia: {analysis.scores.prosodic:.1f}/10")
+            
+            # Mostrar transcript
+            print(f"\n📝 TRANSCRIPCIÓN: {analysis.transcript}")
+            
+            # Mostrar errores detectados
+            if analysis.word_errors:
+                print(f"\n⚠️  ERRORES DE PALABRAS DETECTADOS:")
+                for error in analysis.word_errors:
+                    print(f"   • {error.word}: {error.accuracy_score:.1f}/10 - {error.suggestion}")
+            
+            if analysis.phoneme_errors:
+                print(f"\n🔊 ERRORES DE FONEMAS DETECTADOS:")
+                for error in analysis.phoneme_errors:
+                    print(f"   • En '{error.word}': /{error.canonical_phone}/ → /{error.pronounced_phone}/")
+            
+            # Mostrar recomendaciones
+            if analysis.recommendations:
+                print(f"\n💡 RECOMENDACIONES:")
+                for rec in analysis.recommendations:
+                    print(f"   {rec}")
+            
+            print(f"\n🎯 Confianza del análisis: {analysis.confidence:.1%}")
+            print("~" * 70)
+    
+    def create_comparison_visualization(self, results: List[Dict]) -> None:
+        """Crear visualizaciones comparando scores reales vs predichos"""
+        
+        # Filtrar solo resultados con scores reales
+        real_results = [r for r in results if r.get("real_scores")]
+        
+        if not real_results:
+            logger.info("No hay scores reales para comparar, usando visualización estándar")
+            return self.create_visualization(results)
+        
+        # Configurar visualización
+        plt.style.use('seaborn-v0_8')
+        fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+        fig.suptitle('Comparación: Scores Reales vs Predichos del Modelo', fontsize=16, fontweight='bold')
+        
+        # Extraer datos para comparación
+        sample_names = [f"Muestra {i+1}" for i in range(len(real_results))]
+        
+        real_accuracy = [r["real_scores"]["accuracy"] for r in real_results]
+        pred_accuracy = [r["analysis"].scores.accuracy for r in real_results]
+        
+        real_fluency = [r["real_scores"]["fluency"] for r in real_results]
+        pred_fluency = [r["analysis"].scores.fluency for r in real_results]
+        
+        real_total = [r["real_scores"]["total"] for r in real_results]
+        pred_total = [r["analysis"].scores.overall for r in real_results]
+        
+        # Gráfico 1: Comparación de Precisión
+        ax1 = axes[0, 0]
+        x = np.arange(len(sample_names))
+        width = 0.35
+        
+        ax1.bar(x - width/2, real_accuracy, width, label='Real', alpha=0.8, color='skyblue')
+        ax1.bar(x + width/2, pred_accuracy, width, label='Predicho', alpha=0.8, color='orange')
+        
+        ax1.set_xlabel('Muestras')
+        ax1.set_ylabel('Precisión')
+        ax1.set_title('Precisión: Real vs Predicho')
+        ax1.set_xticks(x)
+        ax1.set_xticklabels(sample_names, rotation=45)
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # Gráfico 2: Comparación de Fluidez
+        ax2 = axes[0, 1]
+        ax2.bar(x - width/2, real_fluency, width, label='Real', alpha=0.8, color='lightgreen')
+        ax2.bar(x + width/2, pred_fluency, width, label='Predicho', alpha=0.8, color='coral')
+        
+        ax2.set_xlabel('Muestras')
+        ax2.set_ylabel('Fluidez')
+        ax2.set_title('Fluidez: Real vs Predicho')
+        ax2.set_xticks(x)
+        ax2.set_xticklabels(sample_names, rotation=45)
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+        
+        # Gráfico 3: Scatter plot Real vs Predicho
+        ax3 = axes[1, 0]
+        ax3.scatter(real_total, pred_total, alpha=0.7, s=100)
+        
+        # Línea diagonal perfecta
+        min_val = min(min(real_total), min(pred_total))
+        max_val = max(max(real_total), max(pred_total))
+        ax3.plot([min_val, max_val], [min_val, max_val], 'r--', alpha=0.8, label='Predicción Perfecta')
+        
+        ax3.set_xlabel('Score Real')
+        ax3.set_ylabel('Score Predicho')
+        ax3.set_title('Correlación: Real vs Predicho')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # Gráfico 4: Errores absolutos
+        ax4 = axes[1, 1]
+        errors = [abs(r - p) for r, p in zip(real_total, pred_total)]
+        
+        bars = ax4.bar(sample_names, errors, alpha=0.8, color='red')
+        ax4.set_xlabel('Muestras')
+        ax4.set_ylabel('Error Absoluto')
+        ax4.set_title('Error Absoluto por Muestra')
+        ax4.set_xticklabels(sample_names, rotation=45)
+        ax4.grid(True, alpha=0.3)
+        
+        # Añadir valores encima de las barras
+        for bar, error in zip(bars, errors):
+            height = bar.get_height()
+            ax4.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{error:.1f}', ha='center', va='bottom')
+        
+        plt.tight_layout()
+        plt.show()
+    
+    def show_final_summary_with_comparison(self, results: List[Dict]) -> None:
+        """Mostrar resumen final con métricas de comparación"""
+        
+        real_results = [r for r in results if r.get("real_scores")]
+        
+        print("\n" + "="*80)
+        print("📊 RESUMEN FINAL DEL ANÁLISIS")
+        print("="*80)
+        
+        if real_results:
+            # Calcular métricas de error
+            total_errors = []
+            accuracy_errors = []
+            fluency_errors = []
+            
+            for result in real_results:
+                real = result["real_scores"]
+                pred = result["analysis"].scores
+                
+                total_errors.append(abs(real["total"] - pred.overall))
+                accuracy_errors.append(abs(real["accuracy"] - pred.accuracy))
+                fluency_errors.append(abs(real["fluency"] - pred.fluency))
+            
+            print(f"🎯 **Métricas de Evaluación del Modelo:**")
+            print(f"   • Muestras con datos reales: {len(real_results)}")
+            print(f"   • Error Absoluto Medio (Total): {np.mean(total_errors):.2f}")
+            print(f"   • Error Absoluto Medio (Precisión): {np.mean(accuracy_errors):.2f}")
+            print(f"   • Error Absoluto Medio (Fluidez): {np.mean(fluency_errors):.2f}")
+            print(f"   • Error Máximo: {np.max(total_errors):.2f}")
+            print(f"   • Error Mínimo: {np.min(total_errors):.2f}")
+        
+        print(f"\n📈 **Resumen General:**")
+        print(f"   • Total de muestras analizadas: {len(results)}")
+        
+        avg_confidence = np.mean([r["analysis"].confidence for r in results])
+        print(f"   • Confianza promedio: {avg_confidence:.1%}")
+        
+        total_word_errors = sum(len(r["analysis"].word_errors) for r in results)
+        total_phoneme_errors = sum(len(r["analysis"].phoneme_errors) for r in results)
+        print(f"   • Total errores de palabras detectados: {total_word_errors}")
+        print(f"   • Total errores de fonemas detectados: {total_phoneme_errors}")
+        
+        if real_results:
+            avg_real_score = np.mean([r["real_scores"]["total"] for r in real_results])
+            avg_pred_score = np.mean([r["analysis"].scores.overall for r in real_results])
+            print(f"   • Score real promedio: {avg_real_score:.2f}/10")
+            print(f"   • Score predicho promedio: {avg_pred_score:.2f}/10")
+        
+        print("\n✅ **Análisis completado con éxito!**")
+        
+        if real_results:
+            print("🎯 **El modelo fue evaluado con datos reales del dataset speechocean762**")
+            mae = np.mean(total_errors)
+            if mae < 1.0:
+                print("🟢 **Rendimiento: EXCELENTE** (Error < 1.0)")
+            elif mae < 2.0:
+                print("🟡 **Rendimiento: BUENO** (Error < 2.0)")
+            else:
+                print("🔴 **Rendimiento: NECESITA MEJORA** (Error > 2.0)")
+        
+        print("="*80)
 
 
 def main():
