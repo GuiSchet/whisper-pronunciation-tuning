@@ -175,7 +175,7 @@ class PronunciationAnalyzer:
         sampling_rate: int = 16000,
         expected_text: str = None
     ) -> str:
-        """Generar análisis de pronunciación usando el modelo fine-tuneado"""
+        """Generar análisis de pronunciación completo usando el modelo fine-tuneado para análisis"""
         
         # Preprocesar audio
         audio = self.preprocess_audio(audio_path, audio_array, sampling_rate)
@@ -190,24 +190,45 @@ class PronunciationAnalyzer:
         # Mover a dispositivo con tipo de dato float32 para consistencia
         input_features = inputs.input_features.to(self.device, dtype=torch.float32)
         
-        # Generar transcripción usando Whisper
+        # Generar análisis de pronunciación usando el modelo entrenado
         with torch.no_grad():
+            # Probar primero con greedy decoding para más consistencia
             generated_ids = self.model.generate(
                 input_features,
-                max_new_tokens=100,  # Reducido para transcripción
-                temperature=0.0,  # Determinístico para transcripción
-                do_sample=False,  # Sin sampling para mejor transcripción
-                pad_token_id=self.tokenizer.eos_token_id
+                max_new_tokens=400,      # Ajustado para límites del modelo Whisper (448 max)
+                do_sample=False,         # Usar greedy decoding para consistencia
+                num_beams=1,            # Sin beam search
+                pad_token_id=self.tokenizer.eos_token_id,
+                eos_token_id=self.tokenizer.eos_token_id,
+                forced_decoder_ids=None,  # Evitar configuración depreciada
+                suppress_tokens=None      # Permitir todos los tokens
             )
         
-        # Decodificar resultado
-        transcribed_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
+        # Decodificar resultado del modelo entrenado
+        analysis_text = self.tokenizer.decode(generated_ids[0], skip_special_tokens=True)
         
         # Debug: mostrar qué está generando el modelo
-        logger.info(f"Transcripción generada: '{transcribed_text}'")
+        logger.info(f"Análisis generado por el modelo: '{analysis_text}'")
         
-        # Crear análisis de pronunciación sintético basado en la transcripción
-        analysis_text = self.create_pronunciation_analysis(transcribed_text, expected_text)
+        # Verificar si el análisis tiene el formato esperado
+        required_sections = [
+            "TRANSCRIPCIÓN:",
+            "PUNTUACIÓN GENERAL:",
+            "PRECISIÓN:",
+            "FLUIDEZ:",
+            "COMPLETITUD:",
+            "PROSODIA:"
+        ]
+        
+        has_proper_format = all(section in analysis_text for section in required_sections)
+        
+        # También verificar que tenga valores numéricos después de las secciones
+        has_scores = bool(re.search(r"PUNTUACIÓN GENERAL:\s*\d+", analysis_text))
+        
+        # Si el análisis está incompleto o malformado, usar análisis sintético como fallback
+        if len(analysis_text.strip()) < 100 or not has_proper_format or not has_scores:
+            logger.warning("Análisis del modelo incompleto, usando análisis sintético como fallback")
+            analysis_text = self.create_pronunciation_analysis(analysis_text, expected_text)
         
         return analysis_text
     

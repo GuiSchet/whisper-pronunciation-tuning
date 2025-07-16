@@ -424,8 +424,8 @@ class PronunciationDemo:
             logger.error("❌ No se pudieron generar resultados")
             return
         
-        # Mostrar resultados detallados con comparación
-        self.display_detailed_results_with_comparison(results)
+        # Mostrar resultados enfocados en detección de errores específicos
+        self.display_error_detection_results(results)
         
         # Crear visualizaciones de comparación
         if show_visualizations:
@@ -663,6 +663,212 @@ class PronunciationDemo:
                 print("🔴 **Rendimiento: NECESITA MEJORA** (Error > 2.0)")
         
         print("="*80)
+
+    def extract_real_pronunciation_errors(self, sample_data: Dict) -> Dict:
+        """Extraer errores específicos de pronunciación del dataset real"""
+        words_data = sample_data.get("words", [])
+        
+        real_errors = {
+            "word_errors": [],
+            "phoneme_errors": [],
+            "total_error_words": 0,
+            "total_mispronunciations": 0
+        }
+        
+        for word_info in words_data:
+            word_text = word_info.get("text", "")
+            word_accuracy = word_info.get("accuracy", 10.0)
+            mispronunciations = word_info.get("mispronunciations", [])
+            
+            # Palabras con errores (accuracy < 8)
+            if word_accuracy < 8.0:
+                real_errors["word_errors"].append({
+                    "word": word_text,
+                    "accuracy": word_accuracy,
+                    "total": word_info.get("total", 10.0)
+                })
+                real_errors["total_error_words"] += 1
+            
+            # Errores específicos de fonemas  
+            for mispron in mispronunciations:
+                real_errors["phoneme_errors"].append({
+                    "word": word_text,
+                    "canonical": mispron.get("canonical-phone", ""),
+                    "pronounced": mispron.get("pronounced-phone", ""),
+                    "index": mispron.get("index", 0)
+                })
+                real_errors["total_mispronunciations"] += 1
+        
+        return real_errors
+
+    def compare_error_detection(self, predicted_analysis, real_errors: Dict, sample_text: str) -> Dict:
+        """Comparar errores detectados por el modelo vs errores reales del dataset"""
+        
+        # Extraer palabras con errores predichos
+        predicted_error_words = set()
+        if predicted_analysis.word_errors:
+            predicted_error_words = {error.word.lower() for error in predicted_analysis.word_errors}
+        
+        # Extraer palabras con errores reales
+        real_error_words = set()
+        if real_errors["word_errors"]:
+            real_error_words = {error["word"].lower() for error in real_errors["word_errors"]}
+        
+        # Calcular métricas de detección
+        true_positives = len(predicted_error_words.intersection(real_error_words))
+        false_positives = len(predicted_error_words - real_error_words)
+        false_negatives = len(real_error_words - predicted_error_words)
+        
+        precision = true_positives / len(predicted_error_words) if predicted_error_words else 0
+        recall = true_positives / len(real_error_words) if real_error_words else 0
+        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        
+        return {
+            "predicted_errors": list(predicted_error_words),
+            "real_errors": list(real_error_words),
+            "correctly_detected": list(predicted_error_words.intersection(real_error_words)),
+            "missed_errors": list(real_error_words - predicted_error_words),
+            "false_alarms": list(predicted_error_words - real_error_words),
+            "metrics": {
+                "precision": precision,
+                "recall": recall,
+                "f1_score": f1_score,
+                "true_positives": true_positives,
+                "false_positives": false_positives,
+                "false_negatives": false_negatives
+            }
+        }
+
+    def display_error_detection_results(self, results: List[Dict]) -> None:
+        """Mostrar resultados enfocados en detección de errores específicos"""
+        
+        print("\n" + "="*90)
+        print("🔍 ANÁLISIS DE DETECCIÓN DE ERRORES DE PRONUNCIACIÓN")
+        print("="*90)
+        print("Comparación: Errores Reales del Dataset vs Errores Detectados por el Modelo")
+        print("="*90)
+        
+        total_metrics = {
+            "total_real_errors": 0,
+            "total_predicted_errors": 0,
+            "total_correctly_detected": 0,
+            "total_missed": 0,
+            "total_false_alarms": 0
+        }
+        
+        for i, result in enumerate(results):
+            sample_info = result["sample_info"]
+            
+            # Extraer errores reales del dataset
+            real_errors = self.extract_real_pronunciation_errors(sample_info)
+            
+            # Comparar con errores detectados por el modelo
+            error_comparison = self.compare_error_detection(
+                result["analysis"], 
+                real_errors, 
+                sample_info["text"]
+            )
+            
+            print(f"\n🎯 MUESTRA {i+1}: {sample_info['description']}")
+            print(f"   Texto: '{sample_info['text']}'")
+            print("-" * 70)
+            
+            # Mostrar respuesta REAL del modelo
+            print(f"🤖 RESPUESTA RAW DEL MODELO:")
+            print(f"   '{result['analysis'].generated_analysis[:200]}...'")
+            
+            # Análisis de errores de palabras
+            print(f"\n📊 ERRORES DE PALABRAS:")
+            print(f"   🎯 Errores reales en dataset: {len(real_errors['word_errors'])} palabras")
+            if real_errors["word_errors"]:
+                for error in real_errors["word_errors"]:
+                    print(f"      • {error['word']}: {error['accuracy']:.1f}/10 (real)")
+            else:
+                print("      • No hay errores de palabras en el dataset")
+            
+            print(f"   🔍 Errores detectados por modelo: {len(error_comparison['predicted_errors'])} palabras")
+            if error_comparison["predicted_errors"]:
+                for word in error_comparison["predicted_errors"]:
+                    print(f"      • {word} (detectado)")
+            else:
+                print("      • Modelo no detectó errores de palabras")
+            
+            # Métricas de detección
+            metrics = error_comparison["metrics"]
+            print(f"\n📈 MÉTRICAS DE DETECCIÓN:")
+            print(f"   ✅ Correctamente detectados: {metrics['true_positives']} palabras")
+            print(f"   ❌ Errores perdidos: {metrics['false_negatives']} palabras")
+            print(f"   🚨 Falsas alarmas: {metrics['false_positives']} palabras")
+            print(f"   🎯 Precisión: {metrics['precision']:.2f}")
+            print(f"   📍 Recall: {metrics['recall']:.2f}")
+            print(f"   🏆 F1-Score: {metrics['f1_score']:.2f}")
+            
+            if error_comparison["correctly_detected"]:
+                print(f"   ✅ Palabras bien detectadas: {', '.join(error_comparison['correctly_detected'])}")
+            if error_comparison["missed_errors"]:
+                print(f"   ❌ Errores no detectados: {', '.join(error_comparison['missed_errors'])}")
+            if error_comparison["false_alarms"]:
+                print(f"   🚨 Falsas alarmas: {', '.join(error_comparison['false_alarms'])}")
+            
+            # Análisis de fonemas
+            print(f"\n🔤 ERRORES DE FONEMAS:")
+            print(f"   Dataset real: {len(real_errors['phoneme_errors'])} errores de fonemas")
+            if real_errors["phoneme_errors"]:
+                for error in real_errors["phoneme_errors"][:3]:  # Mostrar solo los primeros 3
+                    print(f"      • En '{error['word']}': '{error['canonical']}' → '{error['pronounced']}'")
+                if len(real_errors["phoneme_errors"]) > 3:
+                    print(f"      • ... y {len(real_errors['phoneme_errors']) - 3} errores más")
+            
+            # Actualizar métricas totales
+            total_metrics["total_real_errors"] += len(real_errors["word_errors"])
+            total_metrics["total_predicted_errors"] += len(error_comparison["predicted_errors"])
+            total_metrics["total_correctly_detected"] += metrics["true_positives"]
+            total_metrics["total_missed"] += metrics["false_negatives"]
+            total_metrics["total_false_alarms"] += metrics["false_positives"]
+            
+            print("~" * 70)
+        
+        # Resumen final de detección de errores
+        print(f"\n" + "="*90)
+        print("📊 RESUMEN FINAL DE DETECCIÓN DE ERRORES")
+        print("="*90)
+        
+        overall_precision = (total_metrics["total_correctly_detected"] / 
+                           total_metrics["total_predicted_errors"] 
+                           if total_metrics["total_predicted_errors"] > 0 else 0)
+        
+        overall_recall = (total_metrics["total_correctly_detected"] / 
+                         total_metrics["total_real_errors"] 
+                         if total_metrics["total_real_errors"] > 0 else 0)
+        
+        overall_f1 = (2 * overall_precision * overall_recall / 
+                     (overall_precision + overall_recall) 
+                     if (overall_precision + overall_recall) > 0 else 0)
+        
+        print(f"🎯 **Rendimiento del Modelo en Detección de Errores:**")
+        print(f"   • Total errores reales en dataset: {total_metrics['total_real_errors']}")
+        print(f"   • Total errores detectados por modelo: {total_metrics['total_predicted_errors']}")
+        print(f"   • Correctamente detectados: {total_metrics['total_correctly_detected']}")
+        print(f"   • Errores perdidos: {total_metrics['total_missed']}")
+        print(f"   • Falsas alarmas: {total_metrics['total_false_alarms']}")
+        print(f"")
+        print(f"📈 **Métricas Generales:**")
+        print(f"   • Precisión: {overall_precision:.3f}")
+        print(f"   • Recall: {overall_recall:.3f}")
+        print(f"   • F1-Score: {overall_f1:.3f}")
+        
+        # Evaluación del rendimiento
+        if overall_f1 >= 0.7:
+            performance = "🟢 EXCELENTE"
+        elif overall_f1 >= 0.5:
+            performance = "🟡 BUENO"
+        elif overall_f1 >= 0.3:
+            performance = "🟠 NECESITA MEJORA"
+        else:
+            performance = "🔴 POBRE"
+        
+        print(f"   • Rendimiento General: {performance}")
+        print("="*90)
 
 
 def main():
