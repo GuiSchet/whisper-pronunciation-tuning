@@ -15,8 +15,9 @@ from transformers import (
 MODEL_NAME = "openai/whisper-base"
 DATASET_NAME = "mispeech/speechocean762"
 OUTPUT_DIR = "./whisper-pronunciation-assessment-local"
-TRAIN_SAMPLES = 800  # Reducido para un ejemplo rápido. ¡Auméntalo para un modelo real!
-TEST_SAMPLES = 200
+# Usar todo el dataset, sin límites de muestras
+TRAIN_SAMPLES = None  # None para usar todo
+TEST_SAMPLES = None
 
 def main():
     """
@@ -51,8 +52,8 @@ def main():
     raw_dataset = load_dataset(DATASET_NAME, "default", streaming=True, token=hf_token)
 
     # Convertir el dataset de streaming a un dataset en memoria para procesarlo
-    train_subset = list(raw_dataset["train"].take(TRAIN_SAMPLES))
-    test_subset = list(raw_dataset["test"].take(TEST_SAMPLES))
+    train_subset = list(raw_dataset["train"]) if TRAIN_SAMPLES is None else list(raw_dataset["train"].take(TRAIN_SAMPLES))
+    test_subset = list(raw_dataset["test"]) if TEST_SAMPLES is None else list(raw_dataset["test"].take(TEST_SAMPLES))
     dataset = DatasetDict({
         "train": Dataset.from_list(train_subset),
         "test": Dataset.from_list(test_subset)
@@ -87,33 +88,34 @@ def main():
         batched=True,
         batch_size=16,
         remove_columns=dataset["train"].column_names,
-        num_proc=4, # Acelera el preprocesamiento usando múltiples núcleos de CPU
+        num_proc=1,  # Solo 1 proceso para evitar sobrecargar la RAM
     )
     print("Preprocesamiento completado.")
 
     # 4. ENTRENAMIENTO DEL MODELO
     print("\n--- Paso 4: Configurando el Entrenamiento ---")
 
-    # Si recibes un error de "CUDA out of memory", la primera cosa que debes
-    # reducir es 'per_device_train_batch_size' (por ejemplo, a 4, 2 o incluso 1).
+    # Ajustes optimizados para RTX 3060
     training_args = Seq2SeqTrainingArguments(
         output_dir=OUTPUT_DIR,
-        per_device_train_batch_size=8,
+        per_device_train_batch_size=16,  # Ajusta a 32 si tienes suficiente VRAM, o reduce si da error
         gradient_accumulation_steps=1,
         learning_rate=1e-5,
-        warmup_steps=100,
-        max_steps=1000,
-        gradient_checkpointing=False, # ¡Clave para ahorrar memoria de la GPU!
-        eval_strategy="steps",  # <-- CORRECTO según la doc oficial
-        per_device_eval_batch_size=8,
+        warmup_steps=500,
+        num_train_epochs=10,  # Entrena por epochs, no por steps
+        gradient_checkpointing=False,  # Ahorra memoria
+        fp16=True,  # Mixed precision
+        eval_strategy="steps",
+        per_device_eval_batch_size=16,
         predict_with_generate=True,
         generation_max_length=256,
-        save_steps=500,
-        eval_steps=500,
+        save_steps=1000,
+        eval_steps=1000,
         logging_steps=100,
         load_best_model_at_end=True,
         metric_for_best_model="loss",
         greater_is_better=False,
+        save_total_limit=3,  # No llenar el disco
     )
 
     trainer = Seq2SeqTrainer(
@@ -121,7 +123,7 @@ def main():
         model=model,
         train_dataset=processed_dataset["train"],
         eval_dataset=processed_dataset["test"],
-        tokenizer=processor.feature_extractor,
+        tokenizer=processor,  # Usa el processor completo
     )
 
     print("¡Iniciando entrenamiento!")
